@@ -106,7 +106,7 @@ func (b *BzipWriter) bz2_bzWriteOpen(blockSize int, verbosity int, workFactor in
 	cmode := C.CString("w+")
 	defer C.free(unsafe.Pointer(cmode))
 	b.fd = C.fdopen(C.int(b.tmpfile.Fd()), cmode)
-	b.bzfd = (*C.void)(unsafe.Pointer(C.BZ2_bzWriteOpen((*C.int)(unsafe.Pointer(&b.err)), b.fd, C.int(blockSize), C.int(verbosity), C.int(workFactor))))
+	b.bzfd = (*C.BZFILE)(unsafe.Pointer(C.BZ2_bzWriteOpen((*C.int)(unsafe.Pointer(&b.err)), b.fd, C.int(blockSize), C.int(verbosity), C.int(workFactor))))
 	if err := BzipError(b.err); err != nil {
 		return fmt.Errorf("err: %s, fd: %v, tmpfile:%s", err, b.fd, b.tmpfile)
 	}
