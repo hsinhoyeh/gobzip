@@ -98,6 +98,9 @@ func (b *BzipWriter) bz2_bzWriteOpen(blockSize int, verbosity int, workFactor in
 
 // bz2_bzWrite wraps C.bz2_bzWrite
 func (b *BzipWriter) bz2_bzWrite(buf []byte) {
+	if len(buf) == 0 {
+		return
+	}
 	C.BZ2_bzWrite((*C.int)(unsafe.Pointer(&b.err)), unsafe.Pointer(b.bzfd), unsafe.Pointer(&buf[0]), C.int(len(buf)))
 }
 
