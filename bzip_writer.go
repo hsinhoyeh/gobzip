@@ -8,6 +8,7 @@ import "C"
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
@@ -25,6 +26,7 @@ const (
 )
 
 type BzipWriter struct {
+	fd   *C.FILE
 	bzfd *C.BZFILE
 	// err is the cgo operation error
 	err int
@@ -36,7 +38,10 @@ type BzipWriter struct {
 // NewBzipWriter returns a BzipWriter which compresses byte data to w
 func NewBzipWriter(w io.Writer) (*BzipWriter, error) {
 	b := &BzipWriter{w: w}
-	b.bz2_bzWriteOpen(defaultBlockSize, defaultVerbosity, defaultWorkFactor)
+	if err := b.bz2_bzWriteOpen(defaultBlockSize, defaultVerbosity, defaultWorkFactor); err != nil {
+		return nil, err
+	}
+
 	if err := BzipError(b.err); err != nil {
 		return nil, err
 	}
@@ -70,7 +75,12 @@ func (b *BzipWriter) intercept() error {
 
 // Close closes the bzip writer and flushes the data to the w
 func (b *BzipWriter) Close() error {
+	if b.tmpfile == nil {
+		// TODO: should we return err here?
+		return nil
+	}
 	b.bz2_bzWriteClose()
+	defer C.fclose(b.fd)
 	if err := BzipError(b.err); err != nil {
 		return err
 	}
@@ -79,7 +89,11 @@ func (b *BzipWriter) Close() error {
 		return err
 	}
 	defer os.Remove(b.tmpfile.Name())
-	return b.tmpfile.Close()
+	if err := b.tmpfile.Close(); err != nil {
+		return err
+	}
+	b.tmpfile = nil
+	return nil
 }
 
 // bz2_bzWriteOpen wraps C.BZ2_bzWriteOpen
@@ -91,9 +105,12 @@ func (b *BzipWriter) bz2_bzWriteOpen(blockSize int, verbosity int, workFactor in
 
 	cmode := C.CString("w+")
 	defer C.free(unsafe.Pointer(cmode))
-	fd := C.fdopen(C.int(b.tmpfile.Fd()), cmode)
-	b.bzfd = (*C.void)(unsafe.Pointer(C.BZ2_bzWriteOpen((*C.int)(unsafe.Pointer(&b.err)), (*C.FILE)(fd), C.int(blockSize), C.int(verbosity), C.int(workFactor))))
-	return BzipError(b.err)
+	b.fd = C.fdopen(C.int(b.tmpfile.Fd()), cmode)
+	b.bzfd = (*C.void)(unsafe.Pointer(C.BZ2_bzWriteOpen((*C.int)(unsafe.Pointer(&b.err)), b.fd, C.int(blockSize), C.int(verbosity), C.int(workFactor))))
+	if err := BzipError(b.err); err != nil {
+		return fmt.Errorf("err: %s, fd: %v, tmpfile:%s", err, b.fd, b.tmpfile)
+	}
+	return nil
 }
 
 // bz2_bzWrite wraps C.bz2_bzWrite
@@ -127,7 +144,7 @@ var (
 
 // BzipError converts the err codes into golang's error
 func BzipError(err int) error {
-	switch err {
+	switch C.int(err) {
 	case C.BZ_OK:
 		return nil
 	case C.BZ_RUN_OK:
