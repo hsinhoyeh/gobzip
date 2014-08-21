@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"unsafe"
 )
@@ -23,6 +22,8 @@ const (
 	defaultBlockSize  = 9 // from 1 to 9
 	defaultVerbosity  = 0
 	defaultWorkFactor = 0
+
+	defaultBufferLen = 1024
 )
 
 type BzipWriter struct {
@@ -31,7 +32,7 @@ type BzipWriter struct {
 	// err is the cgo operation error
 	err int
 	// tmpfile is a temp storage of the bzip stream
-	tmpfile *os.File
+	tmpfile string
 	w       io.Writer
 }
 
@@ -41,46 +42,43 @@ func NewBzipWriter(w io.Writer) (*BzipWriter, error) {
 	if err := b.bz2_bzWriteOpen(defaultBlockSize, defaultVerbosity, defaultWorkFactor); err != nil {
 		return nil, err
 	}
-
-	if err := BzipError(b.err); err != nil {
-		return nil, err
-	}
 	return b, nil
 }
 
 // Write writes the byte data to the bzip writer
 func (b *BzipWriter) Write(d []byte) (int, error) {
 	b.bz2_bzWrite(d)
-	if C.int(b.err) == C.BZ_OK {
-		return len(d), nil
+	if err := BzipError(b.err); err != nil {
+		return 0, err
 	}
-	return 0, BzipError(b.err)
+	return len(d), nil
 }
 
 // intercept intercepts the underlying temp buffer to the w
 func (b *BzipWriter) intercept() error {
-	if _, err := b.tmpfile.Seek(0, 0); err != nil {
-		return err
-	}
-	d, err := ioutil.ReadAll(b.tmpfile)
-	if err != nil {
-		return err
-	}
-	_, err = b.w.Write(d)
-	if err != nil {
-		return err
+	// seek the tmpfile to the beginning
+	// and start to intercept it to the w (io.Writer)
+	C.fseek(b.fd, C.long(0), C.int(C.SEEK_SET))
+	buffer := make([]byte, defaultBufferLen)
+	n := C.fread(unsafe.Pointer(&buffer[0]), C.size_t(1), C.size_t(defaultBufferLen), b.fd)
+	for {
+		_, err := b.w.Write(buffer[:n])
+		if err != nil {
+			return err
+		}
+		if n != C.size_t(defaultBufferLen) {
+			// exit because we have reached eof
+			return nil
+		}
+		n = C.fread(unsafe.Pointer(&buffer[0]), C.size_t(1), C.size_t(defaultBufferLen), b.fd)
 	}
 	return nil
 }
 
 // Close closes the bzip writer and flushes the data to the w
 func (b *BzipWriter) Close() error {
-	if b.tmpfile == nil {
-		// TODO: should we return err here?
-		return nil
-	}
+	defer os.Remove(b.tmpfile)
 	b.bz2_bzWriteClose()
-	defer C.fclose(b.fd)
 	if err := BzipError(b.err); err != nil {
 		return err
 	}
@@ -88,34 +86,32 @@ func (b *BzipWriter) Close() error {
 	if err := b.intercept(); err != nil {
 		return err
 	}
-	defer os.Remove(b.tmpfile.Name())
-	if err := b.tmpfile.Close(); err != nil {
-		return err
+	if err := C.fclose(b.fd); err != C.int(0) {
+		return fmt.Errorf("close file returns non-zero, file: %s", b.tmpfile)
 	}
-	b.tmpfile = nil
 	return nil
 }
 
 // bz2_bzWriteOpen wraps C.BZ2_bzWriteOpen
 func (b *BzipWriter) bz2_bzWriteOpen(blockSize int, verbosity int, workFactor int) error {
-	var err error
-	if b.tmpfile, err = ioutil.TempFile(defaultDir, defaultPrefix); err != nil {
-		return err
-	}
+	// get a temp file for storing the bzip stream
+	b.tmpfile = tempFile(defaultDir, defaultPrefix)
 
+	filename := C.CString(b.tmpfile)
+	defer C.free(unsafe.Pointer(filename))
 	cmode := C.CString("w+")
 	defer C.free(unsafe.Pointer(cmode))
-	b.fd = C.fdopen(C.int(b.tmpfile.Fd()), cmode)
+	b.fd = C.fopen(filename, cmode)
 	b.bzfd = (*C.BZFILE)(unsafe.Pointer(C.BZ2_bzWriteOpen((*C.int)(unsafe.Pointer(&b.err)), b.fd, C.int(blockSize), C.int(verbosity), C.int(workFactor))))
 	if err := BzipError(b.err); err != nil {
-		return fmt.Errorf("err: %s, fd: %v, tmpfile:%s", err, b.fd, b.tmpfile)
+		return fmt.Errorf("fd: %v, tmpfile:%s, errcode: %d, err: %s", b.fd, b.tmpfile, b.err, err)
 	}
 	return nil
 }
 
 // bz2_bzWrite wraps C.bz2_bzWrite
 func (b *BzipWriter) bz2_bzWrite(buf []byte) {
-	if len(buf) == 0 {
+	if buf == nil || len(buf) == 0 {
 		return
 	}
 	C.BZ2_bzWrite((*C.int)(unsafe.Pointer(&b.err)), unsafe.Pointer(b.bzfd), unsafe.Pointer(&buf[0]), C.int(len(buf)))
